@@ -96,6 +96,16 @@ data "aws_iam_policy_document" "permissions" {
     resources = ["*"]
   }
   statement {
+    sid       = "EcsServiceLinkedRole"
+    actions   = ["iam:CreateServiceLinkedRole"]
+    resources = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS"]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values   = ["ecs.amazonaws.com"]
+    }
+  }
+  statement {
     sid = "Network"
     actions = [
       "ec2:Describe*",
