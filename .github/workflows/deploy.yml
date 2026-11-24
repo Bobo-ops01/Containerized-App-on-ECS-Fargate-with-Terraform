@@ -1,0 +1,71 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "infra/**"
+      - ".github/workflows/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: build-and-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER: ecs-fargate-demo
+  SERVICE: ecs-fargate-demo
+  REPOSITORY: ecs-fargate-demo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform -chdir=infra init -input=false
+
+      - name: Ensure the ECR repository exists
+        run: terraform -chdir=infra apply -auto-approve -input=false -target=aws_ecr_repository.app
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_SHA::7}"
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+          if aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$TAG" --region "$AWS_REGION" > /dev/null 2>&1; then
+            echo "Image $TAG already exists, skipping push"
+          else
+            docker build -t "$REGISTRY/$REPOSITORY:$TAG" app
+            docker push "$REGISTRY/$REPOSITORY:$TAG"
+          fi
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Deploy
+        run: terraform -chdir=infra apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"
+
+      - name: Wait for the service and print the URL
+        run: |
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE" --region "$AWS_REGION"
+          TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --query 'taskArns[0]' --output text --region "$AWS_REGION")
+          ENI=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --region "$AWS_REGION" --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" --region "$AWS_REGION" --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+          echo "App URL: http://${IP}:8080" | tee -a "$GITHUB_STEP_SUMMARY"

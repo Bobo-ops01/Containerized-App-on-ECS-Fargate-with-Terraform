@@ -1,0 +1,49 @@
+name: terraform-plan
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "infra/**"
+      - ".github/workflows/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Build image (no push)
+        run: docker build -t ecs-demo app
+
+      - name: Init
+        run: terraform -chdir=infra init -input=false
+
+      - name: Validate
+        run: terraform -chdir=infra validate
+
+      - name: Plan
+        run: |
+          terraform -chdir=infra plan -no-color -input=false | tee plan.txt
+          {
+            echo '## Terraform plan'
+            echo '```'
+            tail -n 60 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
